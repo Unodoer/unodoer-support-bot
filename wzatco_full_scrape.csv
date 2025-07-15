@@ -1,0 +1,51 @@
+import requests
+from bs4 import BeautifulSoup
+import csv
+import time
+
+visited = set()
+to_visit = ["https://wzatco.com"]
+headers = {"User-Agent": "Mozilla/5.0"}
+
+results = []
+
+def is_valid(url):
+    return url.startswith("https://wzatco.com") and "javascript:" not in url and "#" not in url
+
+while to_visit:
+    url = to_visit.pop(0)
+    if url in visited:
+        continue
+
+    try:
+        print(f"🔍 Visiting: {url}")
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        title = soup.title.string.strip() if soup.title else "No Title"
+        text = soup.get_text(separator=' ', strip=True)
+        cleaned_text = ' '.join(text.split())[:2000]
+
+        results.append([title, url, cleaned_text])
+
+        # Find new internal links
+        for a in soup.find_all("a", href=True):
+            link = a["href"]
+            if link.startswith("/"):
+                link = "https://wzatco.com" + link
+            if is_valid(link) and link not in visited:
+                to_visit.append(link)
+
+        visited.add(url)
+        time.sleep(1)  # avoid being blocked
+
+    except Exception as e:
+        print(f"❌ Error visiting {url}: {e}")
+
+# Save results to CSV
+with open("wzatco_full_scrape.csv", "w", newline='', encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["Page Title", "URL", "Extracted Text"])
+    writer.writerows(results)
+
+print("✅ Finished scraping. Saved to 'wzatco_full_scrape.csv'")
