@@ -1,110 +1,113 @@
-require('dotenv').config();
-const express = require('express');
-const bodyParser = require('body-parser');
-const axios = require('axios');
-const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
+require("dotenv").config();
+const express = require("express");
+const bodyParser = require("body-parser");
+const axios = require("axios");
+const { v4: uuidv4 } = require("uuid");
+const cors = require("cors");
+const path = require("path");
+const { OpenAI } = require("openai");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, "public")));
+
+// Config
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const FAQ_SHEET_URL = process.env.FAQ_SHEET_URL;
+const TICKET_SHEET_URL = process.env.TICKET_SHEET_URL;
+const FEEDBACK_SHEET_URL = process.env.FEEDBACK_SHEET_URL;
 
 // Chat Endpoint
-app.post('/chat', async (req, res) => {
-  const { message } = req.body;
-  if (!message) return res.status(400).json({ error: 'No message received' });
+app.post("/chat", async (req, res) => {
+  const userMessage = req.body.message;
+  if (!userMessage) return res.status(400).json({ error: "Message is required" });
 
   try {
-    const faqRes = await axios.get(process.env.FAQ_SHEET_URL);
-    const faqs = faqRes.data;
-    const match = faqs.find(faq =>
-      message.toLowerCase().includes(faq.Question.toLowerCase())
-    );
+    // 1. Try match from FAQ Sheet
+    const { data: faqData } = await axios.get(FAQ_SHEET_URL);
+    const matched = faqData.find((row) => row.Question?.toLowerCase().trim() === userMessage.toLowerCase().trim());
 
-    if (match) {
-      return res.json({ source: 'faq', answer: match.Answer });
+    if (matched && matched.Answer) {
+      return res.json({ answer: matched.Answer });
     }
 
-    // GPT fallback
-    const gptRes = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a helpful support assistant for UNODOER. Only use information from the company knowledge base.',
-          },
-          { role: 'user', content: message },
-        ],
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    // 2. Fallback to GPT
+    const gptPrompt = `You are a helpful support assistant for UNODOER customers. Reply clearly using only the product knowledge shared with you. User question: "${userMessage}"`;
 
-    const reply = gptRes.data.choices[0].message.content;
-    res.json({ source: 'gpt', answer: reply });
+    console.log("Sending to GPT:", gptPrompt);
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [{ role: "user", content: gptPrompt }],
+    });
+
+    const gptReply = completion.choices[0]?.message?.content || "Sorry, I couldn’t generate a response.";
+    res.json({ answer: gptReply });
   } catch (err) {
-    console.error('Chatbot error:', err.message);
-    res.status(500).json({ error: 'Bot failed' });
+    console.error("Chatbot error:", err.response?.data || err.message || err);
+    res.status(500).json({ error: "Bot failed" });
   }
 });
 
 // Ticket Endpoint
-app.post('/ticket', async (req, res) => {
-  const { name, contact, product, issue, history, attachment } = req.body;
-  const ticketId = `TKT-${Date.now()}`;
+app.post("/ticket", async (req, res) => {
+  const { name, email, issue, product, message, fileUrl } = req.body;
+  if (!name || !email || !issue || !message) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
 
   try {
-    await axios.post(process.env.TICKET_SHEET_URL, {
-      'Ticket ID': ticketId,
-      'Name': name,
-      'Contact': contact,
-      'Product': product,
-      'Issue Summary': issue,
-      'Status': 'Open',
-      'Assigned To': '',
-      'Created At': new Date().toISOString(),
-      'Chat History': history || '',
-      'Attachment Link': attachment || '',
-      'SLA Breach?': 'No',
-    });
+    const ticketId = uuidv4().slice(0, 8).toUpperCase();
+    const submissionTime = new Date().toISOString();
 
+    const row = {
+      Timestamp: submissionTime,
+      TicketID: ticketId,
+      Name: name,
+      Email: email,
+      Product: product || "",
+      Issue: issue,
+      Message: message,
+      FileURL: fileUrl || "",
+      Status: "Open"
+    };
+
+    await axios.post(TICKET_SHEET_URL, row);
     res.json({ success: true, ticketId });
-  } catch (error) {
-    console.error('Ticket creation failed:', error.message);
-    res.status(500).json({ error: 'Failed to raise ticket' });
+  } catch (err) {
+    console.error("Ticket error:", err.response?.data || err.message || err);
+    res.status(500).json({ error: "Ticket submission failed" });
   }
 });
 
 // Feedback Endpoint
-app.post('/feedback', async (req, res) => {
+app.post("/feedback", async (req, res) => {
   const { ticketId, rating, comment } = req.body;
+  if (!ticketId || !rating) {
+    return res.status(400).json({ error: "Ticket ID and rating required" });
+  }
 
   try {
-    await axios.post(process.env.FEEDBACK_SHEET_URL, {
-      'Ticket ID': ticketId,
-      'Rating (1–5)': rating,
-      'Comment': comment,
-      'Submitted At': new Date().toISOString(),
-    });
+    const feedbackRow = {
+      Timestamp: new Date().toISOString(),
+      TicketID: ticketId,
+      Rating: rating,
+      Comment: comment || ""
+    };
 
+    await axios.post(FEEDBACK_SHEET_URL, feedbackRow);
     res.json({ success: true });
-  } catch (error) {
-    console.error('Feedback failed:', error.message);
-    res.status(500).json({ error: 'Feedback error' });
+  } catch (err) {
+    console.error("Feedback error:", err.response?.data || err.message || err);
+    res.status(500).json({ error: "Feedback submission failed" });
   }
 });
 
-app.listen(PORT, () =>
-  console.log(`✅ UNODOER bot running on port ${PORT}`)
-);
-
+// Start Server
+app.listen(PORT, () => {
+  console.log(`UNODOER bot running on http://localhost:${PORT}`);
+});
